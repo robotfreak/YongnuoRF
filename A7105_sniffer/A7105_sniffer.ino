@@ -7,16 +7,21 @@
 
 #include "a7105.h"
 
-#define SNIFF_MODE
+const uint8_t CHANNEL = 1; /* 1 - 16 */
+
+//#define SNIFF_MODE
 
 #if defined (SNIFF_MODE)
-#define PAYLOAD_SIZ 6
-uint8_t id[4] = { 0x55, 0x55, 0x55, 0x55 };
+const uint8_t id[4] = { 0x55, 0x55, 0x55, 0x55 };
 #else
-#define PAYLOAD_SIZ 2
-uint8_t id[4] = { 0x35, 0x99, 0x9A, 0x5A };
-//  uint8_t id[4] = { 0x5A, 0x9A, 0x99, 0x35 };
+const uint8_t id[4] = { 0x35, 0x99, 0x9A, 0x5A };
 #endif
+
+const uint8_t PAYLOAD_SIZ = 2;
+
+const uint8_t channel_table[16] = {
+  0x71, 0x6B, 0x65, 0x59, 0x53, 0x4D, 0x41, 0x3B, 0x35, 0x29, 0x23, 0x1D, 0x17, 0x11, 0x0B, 0x05
+};
 
 static const uint8_t A7105_regs[] = {
   0xFF, // MODE_REG           0x00
@@ -122,17 +127,16 @@ void setup() {
   A7105_reset();//reset A7105
   delay(100);
   Serial.print("ID: ");
-  A7105_WriteID(&id[0]);
   A7105_ReadID();//for debug only
   A7105_DumpRegs();   // Dump registers
+  A7105_WriteID((uint8_t *) id);
   A7105_Calibrate();  // calibrate A7105
 
   // set read mode
-  _spi_write_adress(0x0F, 0x70);
+  _spi_write_adress(0x0F, channel_table[CHANNEL - 1] - 1);
   _spi_strobe(A7105_STANDBY);
   _spi_strobe(A7105_RST_RDPTR);
   _spi_strobe(A7105_RX);
-
 }
 
 uint8_t in[PAYLOAD_SIZ];
@@ -141,15 +145,13 @@ uint8_t out[PAYLOAD_SIZ];
 //############ MAIN LOOP ##############
 void loop() {
   int i, c;
-  int len;
   char cmd;
 
   if (digitalRead(GIO_pin) == LOW)
   {
-    len = PAYLOAD_SIZ;
-    A7105_ReadData(len, &in[0]);
+    A7105_ReadData(PAYLOAD_SIZ, in);
     // set read mode
-    _spi_write_adress(0x0F, 0x70);
+    _spi_write_adress(0x0F, channel_table[CHANNEL - 1] - 1);
     _spi_strobe(A7105_STANDBY);
     _spi_strobe(A7105_RST_RDPTR);
     _spi_strobe(A7105_RX);
@@ -159,40 +161,36 @@ void loop() {
   {
     if (Serial.available())
     {
-      out[0] = 0x35;
-      out[1] = 0x99;
-      out[2] = 0x9a;
-      out[3] = 0x5a;
       cmd = Serial.read();
       switch (cmd)
       {
         case 'f':
-          out[4] = 0x44;
-          out[5] = 0xBB;
+          out[0] = 0x44;
+          out[1] = 0xBB;
           break;
         case 's':
-          out[4] = 0x88;
-          out[5] = 0x77;
+          out[0] = 0x88;
+          out[1] = 0x77;
           break;
         default:
           break;
       }
+      
       if (cmd == 'f' or cmd == 's')
       {
         channel = 0x71;
-        len = PAYLOAD_SIZ;
         Serial.print("chan: ");
         Serial.println(channel, HEX);
         for (c = 0; c < 16; c++)
         {
           _spi_strobe(A7105_STANDBY);
           _spi_strobe(A7105_RST_WRPTR);
-          _spi_write_adress(0x0F, 0x71);
-          A7105_WriteData(len, &out[0]);
+          _spi_write_adress(0x0F, channel_table[CHANNEL - 1]);
+          A7105_WriteData(PAYLOAD_SIZ, &out[0]);
           _spi_strobe(A7105_TX);
           delay(2);
           // set read mode
-          _spi_write_adress(0x0F, 0x70);
+          _spi_write_adress(0x0F, channel_table[CHANNEL - 1] - 1);
           _spi_strobe(A7105_STANDBY);
           _spi_strobe(A7105_RST_RDPTR);
           _spi_strobe(A7105_RX);
