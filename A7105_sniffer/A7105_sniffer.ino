@@ -2,32 +2,35 @@
 // using n A7105 chip and a Arduino /pro/micro with 3.3V
 // based on Flysky Tx Code by midelic on RCgroups.com
 //
-// created by RobotFreak
+// created by RobotFreak & Seegel Systeme
 // www.photofreak.de
 
 #include "a7105.h"
 
 const uint8_t CHANNEL = 1; /* 1 - 16 */
 
-//#define SNIFF_MODE
+const uint8_t RX_MODE_TRX = 1; //receive FOCUS & SHOOT commands from 603 in TRX mode
+const uint8_t RX_MODE_TX = 0; //receive FLASH commands from 603 in TX mode or TRX mode & mounted on cam
 
-#if defined (SNIFF_MODE)
-const uint8_t id[4] = { 0x55, 0x55, 0x55, 0x55 };
-#else
+const uint8_t RX_MODE = RX_MODE_TX;
+
+
 const uint8_t id[4] = { 0x35, 0x99, 0x9A, 0x5A };
-#endif
-
 const uint8_t PAYLOAD_SIZ = 2;
+const uint8_t RX_SIZE = 4;
 
 const uint8_t channel_table[16] = {
   0x71, 0x6B, 0x65, 0x59, 0x53, 0x4D, 0x41, 0x3B, 0x35, 0x29, 0x23, 0x1D, 0x17, 0x11, 0x0B, 0x05
 };
 
+const uint8_t TRX_CH_OFFSET = 2; //in TRX mode, different channels are used!
+const uint8_t RX_CH_OFFSET = 1; //Receiving one IF lower
+
 static const uint8_t A7105_regs[] = {
   0xFF, // MODE_REG           0x00
   0x42, // MODECTRL_REG       0x01
   0xFF, // CALIBRATION_REG    0x02
-  PAYLOAD_SIZ - 1, // FIFO1_REG          0x03  0x01
+  RX_SIZE - 1, // FIFO1_REG   0x03
   0x00, // FIFO2_REG          0x04
   0x00, // FIFO_REG           0x05
   0x00, // IDCODE_REG         0x06
@@ -55,11 +58,7 @@ static const uint8_t A7105_regs[] = {
   0x0A, // RXGAIN4_REG        0x1C
   0x32, // RSSI_REG           0x1D
   0xC3, // ADC_REG            0x1E
-#if defined (SNIFF_MODE)
-  0x05, // CODE1_REG          0x1F
-#else
   0x07, // CODE1_REG          0x1F
-#endif
   0x16, // CODE2_REG          0x20
   0x00, // CODE3_REG          0x21
   0x00, // IFCAL1_REG         0x22
@@ -104,13 +103,59 @@ static const uint8_t A7105_regs[] = {
 #define NOP() __asm__ __volatile__("nop")
 
 //########## Variables #################
-static uint8_t channel;
-static byte counter = 255;
 static uint8_t aid[4];//for debug only
-static uint8_t packet[21];//inside code there are 16....so don't bother
+uint8_t in[RX_SIZE];
+uint8_t out[PAYLOAD_SIZ];
+
+
+void sendFlash() {
+  _spi_write_adress(0x0F, channel_table[CHANNEL - 1]);
+  uint8_t data[PAYLOAD_SIZ] = {0x88, 0x77};
+  for (uint8_t c = 0; c < 10; c++) {
+    A7105_WriteData(PAYLOAD_SIZ, data);
+    _spi_strobe(A7105_STANDBY);
+    _spi_strobe(A7105_TX);
+    delay(12);
+  }
+  Serial.println("Sent flash");
+}
+
+void sendShoot() {
+  _spi_write_adress(0x0F, channel_table[CHANNEL - 1] + TRX_CH_OFFSET);
+  uint8_t data[PAYLOAD_SIZ] = {0x22, 0xdd};
+  for (uint8_t c = 0; c < 30; c++) {
+    A7105_WriteData(PAYLOAD_SIZ, data);
+    _spi_strobe(A7105_STANDBY);
+    _spi_strobe(A7105_TX);
+    delay(12);
+  }
+  Serial.println("Sent shoot");
+}
+
+void sendFocus() {
+  _spi_write_adress(0x0F, channel_table[CHANNEL - 1] + TRX_CH_OFFSET);
+  uint8_t data[PAYLOAD_SIZ] = {0x11, 0xee};
+  for (uint8_t c = 0; c < 50; c++) {
+    A7105_WriteData(PAYLOAD_SIZ, data);
+    _spi_strobe(A7105_STANDBY);
+    _spi_strobe(A7105_TX);
+    delay(12);
+  }
+  Serial.println("Sent focus");
+}
+
+void startRx() {
+  if (RX_MODE == RX_MODE_TRX)
+    _spi_write_adress(0x0F, channel_table[CHANNEL - 1] - RX_CH_OFFSET + TRX_CH_OFFSET);
+  if (RX_MODE == RX_MODE_TX)
+    _spi_write_adress(0x0F, channel_table[CHANNEL - 1] - RX_CH_OFFSET);
+    
+  _spi_strobe(A7105_STANDBY);
+  _spi_strobe(A7105_RST_RDPTR);
+  _spi_strobe(A7105_RX);  
+}
 
 void setup() {
-
   Serial.begin(57600);
   pinMode(RED_LED_pin, OUTPUT);
   //RF module pins
@@ -132,30 +177,17 @@ void setup() {
   A7105_WriteID((uint8_t *) id);
   A7105_Calibrate();  // calibrate A7105
 
-  // set read mode
-  _spi_write_adress(0x0F, channel_table[CHANNEL - 1] - 1);
-  _spi_strobe(A7105_STANDBY);
-  _spi_strobe(A7105_RST_RDPTR);
-  _spi_strobe(A7105_RX);
+  startRx();
 }
-
-uint8_t in[PAYLOAD_SIZ];
-uint8_t out[PAYLOAD_SIZ];
 
 //############ MAIN LOOP ##############
 void loop() {
   int i, c;
   char cmd;
-
-  if (digitalRead(GIO_pin) == LOW)
-  {
-    A7105_ReadData(PAYLOAD_SIZ, in);
-    // set read mode
-    _spi_write_adress(0x0F, channel_table[CHANNEL - 1] - 1);
-    _spi_strobe(A7105_STANDBY);
-    _spi_strobe(A7105_RST_RDPTR);
-    _spi_strobe(A7105_RX);
-    //    delay(10);
+  
+  if (digitalRead(GIO_pin) == LOW)   {
+    A7105_ReadData(RX_SIZE, in);
+    startRx();
   }
   else
   {
@@ -165,37 +197,22 @@ void loop() {
       switch (cmd)
       {
         case 'f':
-          out[0] = 0x44;
-          out[1] = 0xBB;
+          sendFocus();
+          startRx();
           break;
+          
         case 's':
-          out[0] = 0x88;
-          out[1] = 0x77;
+          sendShoot();
+          startRx();
           break;
+
+        case 'l':
+          sendFlash();
+          startRx();
+          break;
+          
         default:
           break;
-      }
-      
-      if (cmd == 'f' or cmd == 's')
-      {
-        channel = 0x71;
-        Serial.print("chan: ");
-        Serial.println(channel, HEX);
-        for (c = 0; c < 16; c++)
-        {
-          _spi_strobe(A7105_STANDBY);
-          _spi_strobe(A7105_RST_WRPTR);
-          _spi_write_adress(0x0F, channel_table[CHANNEL - 1]);
-          A7105_WriteData(PAYLOAD_SIZ, &out[0]);
-          _spi_strobe(A7105_TX);
-          delay(2);
-          // set read mode
-          _spi_write_adress(0x0F, channel_table[CHANNEL - 1] - 1);
-          _spi_strobe(A7105_STANDBY);
-          _spi_strobe(A7105_RST_RDPTR);
-          _spi_strobe(A7105_RX);
-          delay(18);
-        }
       }
     }
   }
@@ -314,15 +331,10 @@ void A7105_WriteData(int len, uint8_t * data) {
   int i;
   CS_off;
   _spi_write(0x05);
-  Serial.print(">");
-  for (i = 0; i < len; i++)
-  {
+  for (i = 0; i < len; i++)   {
     _spi_write(*data);
-    Serial.print(*data, HEX);
-    Serial.print(" ");
     data++;
   }
-  Serial.println("");
   CS_on;
 }
 
